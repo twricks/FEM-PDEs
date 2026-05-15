@@ -1,53 +1,68 @@
 import gdsfactory as gf
+import gplugins.tidy3d as gt
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Activate the generic PDK
 gf.gpdk.PDK.activate()
 
-c = gf.Component(name="hello_thomas_chip")
-
-# 1. Create the grating coupler once (uses standard 0.5 µm strip)
+# 1. Create the TE grating coupler (8° angle, low-loss elliptical design)
 gc = gf.components.grating_coupler_elliptical(
     fiber_angle=8.0,
-    cross_section="strip"
+    cross_section="strip",      # 220 nm Si, width=0.5 µm (meets min 200 nm rule)
+    taper_length=30,
+    grating_line_width=0.343,
+    n_periods=30,
 )
 
-# 2. Left grating coupler
-gc_left = c.add_ref(gc)
-gc_left.move((0, 0))
+gc.plot()
+gc.write_gds("grating_coupler_te_8deg.gds")
+print("✅ GDS saved — open in KLayout (press F to fit)")
 
-# 3. Right grating coupler (mirrored)
-gc_right = c.add_ref(gc)
-gc_right.mirror()
-gc_right.move((800, 0))
+# 2. Run Tidy3D FDTD simulation with debugging
+print("\n🚀 Starting Tidy3D simulation (1–3 minutes)...")
+try:
+    sp = gt.write_sparameters_grating_coupler(
+        component=gc,
+        port_waveguide_name="o1",      # waveguide port
+        fiber_port_prefix="o2",        # fiber port
+        run=True,
+        verbose=True,
+    )
 
-# 4. Route a visibly thicker waveguide (fixes the warning + looks like a real chip)
-wide_strip = gf.cross_section.strip(width=2.0)   # ← 2 µm wide
-gf.routing.route_single(
-    c,
-    port1=gc_left.ports["o1"],
-    port2=gc_right.ports["o1"],
-    cross_section=wide_strip
-)
+    if sp is None:
+        raise ValueError("Simulation returned None (check Tidy3D credits / internet)")
 
-# 5. "Hello Thomas" label centered above
-text = gf.components.text(
-    text="Hello Thomas",
-    size=20,
-    justify="center",
-    layer=(1, 0)
-)
-text_ref = c.add_ref(text)
-text_ref.move((400, 120))
+    print("✅ Simulation succeeded! Available S-parameter keys:")
+    print(list(sp.keys()))
 
-# 6. Die outline (the box that makes it look like a real chip)
-die = gf.components.rectangle(
-    size=(1200, 600),
-    layer=(99, 0)
-)
-die_ref = c.add_ref(die)
-die_ref.move((-200, -300))
+    # 3. Extract coupling efficiency
+    wavelengths = sp["wavelengths"] * 1e6          # µm
+    transmission = 10 * np.log10(np.abs(sp["o2@0,o1@0"]) ** 2)   # coupling loss in dB
 
-# Show and save
-c.plot()
-c.write_gds("hello_thomas_chip.gds")
-print("✅ Done! Open hello_thomas_chip.gds in KLayout")
+    min_loss_db = transmission.min()
+    best_wl = wavelengths[transmission.argmin()]
+
+    print(f"\n✅ RESULTS")
+    print(f"Minimum coupling loss: {min_loss_db:.2f} dB at {best_wl:.3f} µm")
+
+except Exception as e:
+    print(f"\n❌ Simulation failed with error: {e}")
+    print("   → Try running 'tidy3d configure' again or check your free credits at tidy3d.simulation.cloud")
+    raise
+
+# 4. Plot for your submission
+plt.figure(figsize=(8, 5))
+plt.plot(wavelengths, transmission, "b-", linewidth=2, label="Coupling efficiency")
+plt.axvline(1.55, color="red", linestyle="--", label="1550 nm target")
+plt.xlabel("Wavelength (µm)")
+plt.ylabel("Coupling loss (dB)")
+plt.title("TE Fiber Grating Coupler – 8° angle (220 nm Si)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Save results
+np.savez("grating_coupler_sparameters.npz", **sp)
+print("✅ S-parameters saved!")
